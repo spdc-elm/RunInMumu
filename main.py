@@ -15,11 +15,11 @@ from gpx_parser import parse_gpx, remove_duplicates
 # --- 全局配置 ---
 CONFIG_PATH = Path("config.json")
 
-JITTER_RADIUS_M = 2.0  # 定位抖动半径（米），模拟定位失真
+JITTER_RADIUS_M = 0.1  # 定位抖动半径（米），模拟定位失真
 BASE_SPEED_MPS = 2.8  # 平均速度（米/秒）- 约3km/18分钟 = 2.8m/s
 SPEED_JITTER_RATIO = 0.20  # 速度波动 ±20%，模拟步频变化
 TICK_INTERVAL_SEC = 0.40  # GPS位置更新间隔（秒）
-DIST_LIMIT_M = 3200  # 总距离阈值（米）- 约3.2公里
+DIST_LIMIT_M = 4000  # 总距离阈值（米）- 约3.2公里
 
 # --- 终端颜色定义 ---
 CLR_A = "\x1b[01;38;5;117m"
