@@ -2,6 +2,7 @@ import json
 import math
 import os
 import random
+import select
 import subprocess
 import sys
 import time
@@ -9,6 +10,23 @@ from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
 from prettytable import PrettyTable
+
+# Windows 非阻塞键盘检测
+if os.name == "nt":
+    import msvcrt
+    def key_pressed() -> bool:
+        """检查是否有按键按下（非阻塞）"""
+        return msvcrt.kbhit()
+    def get_key() -> str:
+        """获取按下的键"""
+        return msvcrt.getch().decode("utf-8", errors="ignore")
+else:
+    def key_pressed() -> bool:
+        """检查是否有按键按下（非阻塞）- Unix"""
+        return select.select([sys.stdin], [], [], 0)[0] != []
+    def get_key() -> str:
+        """获取按下的键 - Unix"""
+        return sys.stdin.read(1)
 
 from gpx_parser import parse_gpx, remove_duplicates
 from sensor_simulator import (
@@ -247,12 +265,21 @@ def simulate_walk(mgr_path: Path, route: List[Tuple[float, float]], offset: Tupl
     lat, lon = route[0]
     set_location(mgr_path, lon, lat, offset)
     print(f"{CLR_C}已设置初始位置, 开始模拟行走...{CLR_RST}")
+    print(f"{CLR_P}按【Q】键可随时停止跑步{CLR_RST}\n")
 
     while True:
+        # 检查是否有按键按下（非阻塞）
+        if key_pressed():
+            key = get_key().lower()
+            if key == 'q':
+                elapsed = time.perf_counter() - t_start
+                print(f"\n{CLR_A}✔ 手动停止跑步！{CLR_RST}")
+                return elapsed, total_dist
+        
         now = time.perf_counter()
         if now < next_tick:
-            time.sleep(next_tick - now)
-            now = next_tick
+            time.sleep(min(next_tick - now, 0.05))  # 最多睡50ms，以便响应按键
+            continue
         next_tick += TICK_INTERVAL_SEC
         dt = now - t_prev
         t_prev = now
@@ -290,7 +317,7 @@ def simulate_walk(mgr_path: Path, route: List[Tuple[float, float]], offset: Tupl
             f"{CLR_P}{frame/elapsed:7.2f}{CLR_RST}Hz" if elapsed > 0 else "0.00",
         ])
         os.system("cls" if os.name == "nt" else "clear")
-        print(f"{HEART}               跑步模拟进行中...               {CLR_RST}")
+        print(f"{HEART}       跑步模拟进行中... (按 Q 停止)       {CLR_RST}")
         print(tbl)
 
         if total_dist >= DIST_LIMIT_M:
