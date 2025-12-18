@@ -11,6 +11,11 @@ from typing import Iterable, List, Sequence, Tuple
 from prettytable import PrettyTable
 
 from gpx_parser import parse_gpx, remove_duplicates
+from sensor_simulator import (
+    find_adb_path,
+    get_recent_sensor_files,
+    replace_sensor_file,
+)
 
 # --- 全局配置 ---
 CONFIG_PATH = Path("config.json")
@@ -225,8 +230,12 @@ def geo_dist_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return math.hypot(lat2 - lat1, lon2 - lon1) * 111_320
 
 
-def simulate_walk(mgr_path: Path, route: List[Tuple[float, float]], offset: Tuple[float, float]) -> None:
-    """模拟沿着路线行走"""
+def simulate_walk(mgr_path: Path, route: List[Tuple[float, float]], offset: Tuple[float, float]) -> Tuple[float, float]:
+    """模拟沿着路线行走
+    
+    Returns:
+        (elapsed_seconds, total_distance_meters)
+    """
     if len(route) < 2:
         raise ValueError("路径点至少需要两个")
 
@@ -286,7 +295,7 @@ def simulate_walk(mgr_path: Path, route: List[Tuple[float, float]], offset: Tupl
 
         if total_dist >= DIST_LIMIT_M:
             print(f"\n{CLR_A}✔ 已达到目标距离 {DIST_LIMIT_M}米, 模拟结束！{CLR_RST}")
-            break
+            return elapsed, total_dist
 
 
 def main() -> None:
@@ -301,7 +310,53 @@ def main() -> None:
         print(f"{CLR_P}已应用位置偏移: Δlat={offset[0]:.6f}, Δlon={offset[1]:.6f}{CLR_RST}")
     input(f"{CLR_P}准备好后, 按【Enter】键开始模拟走路...{CLR_RST}")
 
-    simulate_walk(mgr_path, route, offset)
+    elapsed, total_dist = simulate_walk(mgr_path, route, offset)
+    
+    # 计算平均速度
+    avg_speed = total_dist / elapsed if elapsed > 0 else 2.8
+    
+    print(f"\n{CLR_C}{'='*50}{CLR_RST}")
+    print(f"{HEART}  跑步模拟完成！{CLR_RST}")
+    print(f"{CLR_C}{'='*50}{CLR_RST}")
+    print(f"\n{CLR_P}跑步统计:{CLR_RST}")
+    print(f"  总时长: {elapsed:.1f}秒 ({elapsed/60:.1f}分钟)")
+    print(f"  总距离: {total_dist:.1f}米")
+    print(f"  平均速度: {avg_speed:.2f}m/s")
+    
+    # 询问是否生成传感器数据
+    print(f"\n{CLR_P}是否生成并替换传感器数据? (Y/n){CLR_RST}")
+    print(f"{CLR_P}  提示: 选择 Y 将自动读取sensor文件采样点数量，生成相同数量的模拟数据{CLR_RST}")
+    
+    generate_sensor = input(f"{CLR_A}选择 [{CLR_P}Y{CLR_A}]: {CLR_RST}").strip().lower()
+    
+    if generate_sensor != 'n':
+        # 获取ADB路径
+        adb_path = find_adb_path(cfg)
+        
+        # 获取最近的sensor文件
+        print(f"\n{CLR_P}正在查找最近的sensor文件...{CLR_RST}")
+        recent_files = get_recent_sensor_files(adb_path, minutes=30)
+        
+        if not recent_files:
+            print(f"{CLR_A}未找到sensor文件，请确保应用已开始记录{CLR_RST}")
+        else:
+            # 默认选择最新的文件
+            target_filename = recent_files[0][0]
+            print(f"{CLR_C}找到最新sensor文件: {target_filename}{CLR_RST}")
+            
+            # 调用替换函数
+            success = replace_sensor_file(adb_path, target_filename, avg_speed)
+            
+            if success:
+                print(f"\n{CLR_C}{'='*50}{CLR_RST}")
+                print(f"{HEART}  SUCCESS! 传感器数据已自动替换！{CLR_RST}")
+                print(f"{CLR_C}{'='*50}{CLR_RST}")
+                print(f"\n{CLR_A}现在可以在应用中点击[结束跑步]了！{CLR_RST}")
+            else:
+                print(f"\n{CLR_A}传感器数据替换失败，请检查错误信息{CLR_RST}")
+    else:
+        print(f"\n{CLR_P}跳过传感器数据生成{CLR_RST}")
+        print(f"{CLR_A}如需手动生成，请运行: python sensor_simulator.py{CLR_RST}")
 
 
 if __name__ == "__main__":

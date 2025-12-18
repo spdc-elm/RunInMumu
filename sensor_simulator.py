@@ -5,13 +5,14 @@
 功能：
 1. 通过ADB列出模拟器中的sensor文件
 2. 根据修改时间筛选最近的文件
-3. 生成符合真实运动模式的加速度数据
+3. 读取原文件采样点数量，生成相同数量的模拟数据
 4. 推送到模拟器的/storage/emulated/0/sensor/目录
 """
 
 import json
 import math
 import random
+import statistics
 import subprocess
 import sys
 import time
@@ -66,6 +67,41 @@ def find_adb_path(cfg: dict) -> Path:
         sys.exit(f"{CLR_A}× 未找到 adb.exe: {adb_path}{CLR_RST}")
     
     return adb_path
+
+
+def get_sensor_file_sample_count(adb_path: Path, filename: str) -> Optional[int]:
+    """
+    读取模拟器中sensor文件的采样点数量
+    
+    Args:
+        adb_path: ADB可执行文件路径
+        filename: sensor文件名
+    
+    Returns:
+        采样点数量，如果读取失败返回None
+    """
+    remote_path = f"/storage/emulated/0/sensor/{filename}"
+    
+    try:
+        # 通过ADB读取文件内容
+        cmd = [str(adb_path), "shell", f"cat {remote_path}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
+        
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        
+        content = result.stdout.strip()
+        
+        # 解析JSON数组格式 [1.23, 4.56, ...]
+        if content.startswith('[') and content.endswith(']'):
+            data = json.loads(content)
+            if isinstance(data, list):
+                return len(data)
+        
+        return None
+    except Exception as e:
+        print(f"{CLR_A}读取sensor文件失败: {e}{CLR_RST}")
+        return None
 
 
 def get_recent_sensor_files(adb_path: Path, minutes: int = 120) -> List[Tuple[str, str, str]]:
@@ -126,18 +162,17 @@ def get_recent_sensor_files(adb_path: Path, minutes: int = 120) -> List[Tuple[st
         return []
 
 
-def generate_sensor_data(duration_sec: float, avg_speed_mps: float = 2.8) -> List[float]:
+def generate_sensor_data_by_count(num_samples: int, avg_speed_mps: float = 2.8) -> List[float]:
     """
-    生成模拟的加速度传感器数据（幅值）
+    根据采样点数量生成模拟的加速度传感器数据
     
     Args:
-        duration_sec: 运动持续时间（秒）
+        num_samples: 采样点数量
         avg_speed_mps: 平均速度（米/秒）
     
     Returns:
         加速度幅值列表
     """
-    num_samples = int(duration_sec * SAMPLING_RATE_HZ)
     data = []
     
     # 根据速度调整幅度（保持接近真实均值）
@@ -147,10 +182,15 @@ def generate_sensor_data(duration_sec: float, avg_speed_mps: float = 2.8) -> Lis
     # 随机步频（在范围内）
     step_freq = random.uniform(STEP_FREQ_MIN, STEP_FREQ_MAX)
     
+    duration_sec = num_samples / SAMPLING_RATE_HZ
     print(f"{CLR_C}生成参数:{CLR_RST}")
     print(f"  采样数: {num_samples}")
+    print(f"  预计时长: {duration_sec:.1f}秒 ({duration_sec/60:.1f}分钟)")
     print(f"  步频: {step_freq:.2f} Hz ({step_freq*60:.0f} 步/分钟)")
     print(f"  基础幅度: {amplitude:.2f} m/s^2")
+    
+    # 初始化不规则因子
+    irregular_factor = random.uniform(0.6, 1.4)
     
     for i in range(num_samples):
         t = i / SAMPLING_RATE_HZ  # 当前时间点（秒）
@@ -166,7 +206,7 @@ def generate_sensor_data(duration_sec: float, avg_speed_mps: float = 2.8) -> Lis
         )
         
         # 不规则性：每几步改变幅度
-        if i == 0 or i % int(SAMPLING_RATE_HZ * 1.2) == 0:
+        if i % int(SAMPLING_RATE_HZ * 1.2) == 0:
             irregular_factor = random.uniform(0.6, 1.4)
         
         # 组合：基线 + 周期分量 + 噪声
@@ -182,6 +222,21 @@ def generate_sensor_data(duration_sec: float, avg_speed_mps: float = 2.8) -> Lis
         data.append(round(value, 6))
     
     return data
+
+
+def generate_sensor_data(duration_sec: float, avg_speed_mps: float = 2.8) -> List[float]:
+    """
+    生成模拟的加速度传感器数据（幅值）- 基于时长
+    
+    Args:
+        duration_sec: 运动持续时间（秒）
+        avg_speed_mps: 平均速度（米/秒）
+    
+    Returns:
+        加速度幅值列表
+    """
+    num_samples = int(duration_sec * SAMPLING_RATE_HZ)
+    return generate_sensor_data_by_count(num_samples, avg_speed_mps)
 
 
 def write_sensor_file(data: List[float], filename: str) -> Path:
@@ -229,8 +284,63 @@ def push_to_emulator(adb_path: Path, local_file: Path, remote_filename: str) -> 
         return False
 
 
+def replace_sensor_file(adb_path: Path, target_filename: str, avg_speed_mps: float = 2.8) -> bool:
+    """
+    自动读取原文件采样点数量并生成相同数量的模拟数据替换
+    
+    这是供 main.py 调用的主要接口函数
+    
+    Args:
+        adb_path: ADB可执行文件路径
+        target_filename: 目标sensor文件名
+        avg_speed_mps: 平均速度（米/秒）
+    
+    Returns:
+        是否成功
+    """
+    print(f"\n{CLR_C}正在读取原文件采样点数量...{CLR_RST}")
+    
+    # 读取原文件采样点数量
+    sample_count = get_sensor_file_sample_count(adb_path, target_filename)
+    
+    if sample_count is None or sample_count == 0:
+        print(f"{CLR_A}无法读取原文件或文件为空，使用默认时长生成{CLR_RST}")
+        # 默认约19分钟 (1143秒 * 10Hz)
+        sample_count = 11430
+    
+    print(f"{CLR_C}原文件采样点: {sample_count}{CLR_RST}")
+    
+    # 生成数据
+    print(f"\n{CLR_C}开始生成传感器数据...{CLR_RST}")
+    sensor_data = generate_sensor_data_by_count(sample_count, avg_speed_mps)
+    
+    # 统计信息
+    print(f"\n{CLR_C}数据统计:{CLR_RST}")
+    print(f"  数据点数: {len(sensor_data)}")
+    print(f"  平均值: {statistics.mean(sensor_data):.2f} m/s^2")
+    print(f"  标准差: {statistics.stdev(sensor_data):.2f} m/s^2")
+    print(f"  最小值: {min(sensor_data):.2f} m/s^2")
+    print(f"  最大值: {max(sensor_data):.2f} m/s^2")
+    
+    # 写入本地文件
+    print(f"\n{CLR_C}目标文件: {target_filename}{CLR_RST}")
+    local_file = write_sensor_file(sensor_data, target_filename)
+    
+    # 推送到模拟器
+    print()
+    success = push_to_emulator(adb_path, local_file, target_filename)
+    
+    # 清理本地临时文件
+    try:
+        local_file.unlink()
+    except:
+        pass
+    
+    return success
+
+
 def main():
-    """主流程"""
+    """主流程 - 交互式模式"""
     print(f"\n{HEART}{'='*60}{CLR_RST}")
     print(f"{HEART}  传感器数据模拟器{CLR_RST}")
     print(f"{HEART}{'='*60}{CLR_RST}\n")
@@ -262,11 +372,15 @@ def main():
         
         # 显示文件列表
         for i, (filename, date_str, time_str) in enumerate(recent_files[:10], 1):
+            # 获取采样点数量
+            sample_count = get_sensor_file_sample_count(adb_path, filename)
+            sample_info = f"  ({sample_count} 采样点)" if sample_count else ""
+            
             if date_str != "unknown":
-                print(f"  {i}. {filename}")
+                print(f"  {i}. {filename}{sample_info}")
                 print(f"     修改时间: {date_str} {time_str}")
             else:
-                print(f"  {i}. {filename}")
+                print(f"  {i}. {filename}{sample_info}")
             print()
         
         if len(recent_files) > 10:
@@ -290,18 +404,7 @@ def main():
             print(f"{CLR_A}ERROR 输入无效{CLR_RST}")
             sys.exit(1)
     
-    # 3. 询问用户运动时长
-    print(f"\n{CLR_P}请输入本次跑步的持续时间(秒):{CLR_RST}")
-    print(f"{CLR_P}  提示: 3200米 @ 2.8m/s ~= 1143秒 ~= 19分钟{CLR_RST}")
-    
-    try:
-        duration_input = input(f"{CLR_A}时长(秒) [{CLR_P}1143{CLR_A}]: {CLR_RST}").strip()
-        duration = float(duration_input) if duration_input else 1143.0
-    except ValueError:
-        print(f"{CLR_A}ERROR 输入无效，使用默认值 1143秒{CLR_RST}")
-        duration = 1143.0
-    
-    # 4. 询问平均速度
+    # 3. 询问平均速度（可选）
     try:
         speed_input = input(f"{CLR_A}平均速度(m/s) [{CLR_P}2.8{CLR_A}]: {CLR_RST}").strip()
         avg_speed = float(speed_input) if speed_input else 2.8
@@ -309,27 +412,8 @@ def main():
         print(f"{CLR_A}ERROR 输入无效，使用默认值 2.8 m/s{CLR_RST}")
         avg_speed = 2.8
     
-    print(f"\n{CLR_C}开始生成传感器数据...{CLR_RST}")
-    
-    # 5. 生成数据
-    sensor_data = generate_sensor_data(duration, avg_speed)
-    
-    # 统计信息
-    import statistics
-    print(f"\n{CLR_C}数据统计:{CLR_RST}")
-    print(f"  数据点数: {len(sensor_data)}")
-    print(f"  平均值: {statistics.mean(sensor_data):.2f} m/s^2")
-    print(f"  标准差: {statistics.stdev(sensor_data):.2f} m/s^2")
-    print(f"  最小值: {min(sensor_data):.2f} m/s^2")
-    print(f"  最大值: {max(sensor_data):.2f} m/s^2")
-    
-    # 6. 写入本地文件（使用选定的文件名）
-    print(f"\n{CLR_C}目标文件: {target_filename}{CLR_RST}")
-    local_file = write_sensor_file(sensor_data, target_filename)
-    
-    # 7. 推送到模拟器（同名替换）
-    print()
-    success = push_to_emulator(adb_path, local_file, target_filename)
+    # 4. 自动读取原文件采样点并生成数据
+    success = replace_sensor_file(adb_path, target_filename, avg_speed)
     
     if success:
         print(f"\n{CLR_C}{'='*60}{CLR_RST}")
@@ -338,13 +422,6 @@ def main():
         print(f"\n{CLR_P}模拟器文件路径:{CLR_RST}")
         print(f"  /storage/emulated/0/sensor/{target_filename}")
         print(f"\n{CLR_A}现在可以在应用中点击[结束跑步]了！{CLR_RST}\n")
-        
-        # 清理本地临时文件
-        try:
-            local_file.unlink()
-            print(f"{CLR_P}(已删除本地临时文件){CLR_RST}")
-        except:
-            pass
     else:
         print(f"\n{CLR_A}ERROR 操作失败，请检查错误信息{CLR_RST}\n")
         sys.exit(1)
